@@ -12,7 +12,7 @@ with THS() as ths:
 
     })
     print("A股:")
-    print(pd.DataFrame(response.get_result()))
+    print(response.df)
     time.sleep(1)
 
     response = ths.query_data({
@@ -24,7 +24,7 @@ with THS() as ths:
 
     })
     print("美股:")
-    print(pd.DataFrame(response.get_result()))
+    print(response.df)
     time.sleep(1)
 
     response = ths.query_data({
@@ -36,7 +36,7 @@ with THS() as ths:
 
     })
     print("可转债:")
-    print(pd.DataFrame(response.get_result()))
+    print(response.df)
     time.sleep(1)
 
     response = ths.query_data({
@@ -48,7 +48,7 @@ with THS() as ths:
 
     })
     print("板块:")
-    print(pd.DataFrame(response.get_result()))
+    print(response.df)
     time.sleep(1)
 
     response = ths.query_data({
@@ -60,7 +60,7 @@ with THS() as ths:
 
     })
     print("可转债:")
-    print(pd.DataFrame(response.get_result()))
+    print(response.df)
     time.sleep(1)
 
     response = ths.query_data({
@@ -72,7 +72,7 @@ with THS() as ths:
 
     })
     print("股票:")
-    print(pd.DataFrame(response.get_result()))
+    print(response.df)
     time.sleep(1)
 
     response = ths.query_data({
@@ -84,5 +84,5 @@ with THS() as ths:
 
     })
     print("资金巨鲸数据:")
-    print(pd.DataFrame(response.get_result()))
+    print(response.df)
     time.sleep(1)

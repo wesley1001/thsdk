@@ -8,5 +8,5 @@ bj_tz = ZoneInfo('Asia/Shanghai')
 with THS() as ths:
     response = ths.forex_list()
     print("基本汇率:")
-    print(pd.DataFrame(response.get_result()))
+    print(response.df)
     time.sleep(1)

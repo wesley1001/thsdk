@@ -8,13 +8,13 @@ def main():
     try:
         # 连接到行情服务器
         response = ths.connect()
-        if not response.is_success():
-            print(f"登录错误:{response.err_info}")
+        if not response:
+            print(f"登录错误:{response.error}")
             return
 
         # 获取纳斯达克股票列表
         response = ths.index_list()
-        df = pd.DataFrame(response.get_result())
+        df = response.df
 
         # 按代码前四位分组
         df['code_prefix'] = df['代码'].str[:4]
@@ -27,20 +27,20 @@ def main():
         for prefix, codes in grouped_codes.items():
             print(f"正在处理前缀: {prefix}")
             response = ths.market_data_index(codes)
-            if not response.is_success():
-                print(f"前缀 {prefix} 错误信息: {response.err_info}")
+            if not response:
+                print(f"前缀 {prefix} 错误信息: {response.error}")
                 continue
 
             # 将获取的数据添加到总列表
-            if response.get_result():
-                all_data.extend(response.get_result())
+            if response.data:
+                all_data.extend(response.data)
             time.sleep(0.1)
 
         # 将所有数据转换为DataFrame
         if all_data:
             result_df = pd.DataFrame(all_data)
-            print("股票市场数据:")
-            # pd.set_option('display.max_columns', None)
+            print("市场指数数据:")
+            pd.set_option('display.max_columns', None)
             print(result_df)
             print("查询成功 数量:", len(result_df))
         else:

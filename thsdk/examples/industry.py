@@ -5,7 +5,8 @@ import time
 with THS() as ths:
     response = ths.ths_industry()
     print("行业:")
-    if not response.is_success():
-        print(f"错误信息: {response.err_info}")
-    print(pd.DataFrame(response.get_result()))
+    if not response:
+        print(f"错误信息: {response.error}")
+    else:
+        print(response.df)
     time.sleep(1)

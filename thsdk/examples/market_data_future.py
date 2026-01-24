@@ -8,13 +8,13 @@ def main():
     try:
         # 连接到行情服务器
         response = ths.connect()
-        if not response.is_success():
-            print(f"登录错误:{response.err_info}")
+        if not response:
+            print(f"登录错误:{response.error}")
             return
 
         # 获取主力合约
         response = ths.futures_lists()
-        df = pd.DataFrame(response.get_result())
+        df = response.df
         # 按代码前四位分组
         df['code_prefix'] = df['代码'].str[:4]
         grouped_codes = df.groupby('code_prefix')['代码'].apply(list).to_dict()
@@ -27,13 +27,13 @@ def main():
             print(f"正在处理前缀: {prefix}")
             response = ths.market_data_future(codes,"基础数据")
             time.sleep(0.1)
-            if not response.is_success():
-                print(f"前缀 {prefix} 错误信息: {response.err_info}")
+            if not response:
+                print(f"前缀 {prefix} 错误信息: {response.error}")
                 continue
 
             # 将获取的数据添加到总列表
-            if response.get_result():
-                all_data.extend(response.get_result())
+            if response.data:
+                all_data.extend(response.data)
 
         # 将所有数据转换为DataFrame
         if all_data:

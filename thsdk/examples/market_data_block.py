@@ -51,23 +51,23 @@ def main():
     try:
         # 连接到行情服务器
         response = ths.connect()
-        if not response.is_success():
-            print(f"登录错误:{response.err_info}")
+        if not response:
+            print(f"登录错误:{response.error}")
             return
 
-        response = ths.block_data(block_code)
-        df = pd.DataFrame(response.get_result())
+        response = ths.block(block_code)
+        df = response.df
         # print(df)
 
         urfi_codes = df['代码'].tolist()
 
         response = ths.market_data_block(urfi_codes)
-        df = pd.DataFrame(response.get_result())
+        df = response.df
         # pd.set_option('display.max_columns', None)
         print(df)
 
         response = ths.market_data_block(urfi_codes, "扩展")
-        df = pd.DataFrame(response.get_result())
+        df = response.df
         # pd.set_option('display.max_columns', None)
         print(df)
 

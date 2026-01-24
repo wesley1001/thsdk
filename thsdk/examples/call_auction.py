@@ -8,13 +8,13 @@ with THS() as ths:
     end_time = time.perf_counter()
     execution_time = end_time - start_time
     print("集合竞价:")
-    if not response.is_success():
-        print(response.err_info)
+    if not response:
+        print(response.error)
     else:
-        print(pd.DataFrame(response.get_result()))
+        print(response.df)
     print(f"运行时间: {execution_time:.5f} 秒\n")
 
-    df = pd.DataFrame(response.get_result())
+    df = response.df
     df['匹配量'] = df['当前量']
     df['未匹配量'] = df['买2量'] - df['卖2量']
     df['时间'] = pd.to_datetime(df['时间'], unit='s').dt.tz_localize("UTC").dt.tz_convert("Asia/Shanghai")

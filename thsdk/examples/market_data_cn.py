@@ -8,13 +8,13 @@ def main():
     try:
         # 连接到行情服务器
         response = ths.connect()
-        if not response.is_success():
-            print(f"登录错误:{response.err_info}")
+        if not response:
+            print(f"登录错误:{response.error}")
             return
 
         # 获取板块数据
-        response = ths.block_data(0xE)
-        df = pd.DataFrame(response.get_result())
+        response = ths.block(0xE)
+        df = response.df
 
         # 按代码前四位分组
         df['code_prefix'] = df['代码'].str[:4]
@@ -29,16 +29,16 @@ def main():
             start_time = time.perf_counter()
 
             response = ths.market_data_cn(codes, )
-            if not response.is_success():
-                print(f"前缀 {prefix} 错误信息: {response.err_info}")
+            if not response:
+                print(f"前缀 {prefix} 错误信息: {response.error}")
                 continue
             end_time = time.perf_counter()
             execution_time = end_time - start_time
             print(f"获取 {prefix} 市场数据时间: {execution_time:.5f} 秒")
 
             # 将获取的数据添加到总列表
-            if response.get_result():
-                all_data.extend(response.get_result())
+            if response.data:
+                all_data.extend(response.data)
 
             time.sleep(0.05)
 

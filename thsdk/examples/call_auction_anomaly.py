@@ -22,10 +22,10 @@ with THS() as ths:
             execution_time = end_time - start_time
 
             print(f"\n竞价异动 {market}:")
-            if not response.is_success():
-                print(f"错误信息: {response.err_info}")
+            if not response:
+                print(f"错误信息: {response.error}")
             else:
-                result_df = pd.DataFrame(response.get_result())
+                result_df = response.df
                 if not result_df.empty:
                     # result_df['market'] = market
                     # Convert Unix timestamp in '时间' to datetime in Beijing time

@@ -5,7 +5,7 @@ import pandas as pd
 
 # with THS() as ths:
 #     response = ths.wencai_nlp("龙头行业;国资委;所属行业")
-#     df = pd.DataFrame(response.get_result())
+#     df = response.df
 #     print(df)
 #
 #     time.sleep(1)
@@ -16,12 +16,12 @@ def main():
     try:
         # 连接到行情服务器
         response = ths.connect()
-        if not response.is_success():
-            print(f"登录错误:{response.err_info}")
+        if not response:
+            print(f"登录错误:{response.error}")
             return
 
         response = ths.wencai_nlp("龙头行业;国资委;所属行业")
-        df = pd.DataFrame(response.get_result())
+        df = response.df
 
         def complete_code(code):
             if code.endswith(".SH"):

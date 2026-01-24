@@ -9,12 +9,12 @@ def main():
     try:
         # 连接到行情服务器
         response = ths.connect()
-        if not response.is_success():
-            print(f"登录错误:{response.err_info}")
+        if not response:
+            print(f"登录错误:{response.error}")
             return
 
         response = ths.order_book_ask(ths_code)
-        df = pd.DataFrame(response.get_result())
+        df = response.df
         print("\n=== 市场深度卖方 ===")
         if df.empty:
             print("没有数据")
@@ -22,7 +22,7 @@ def main():
             print(df)
 
         response = ths.order_book_bid(ths_code)
-        df = pd.DataFrame(response.get_result())
+        df = response.df
         print("\n=== 市场深度买方 ===")
         if df.empty:
             print("没有数据")

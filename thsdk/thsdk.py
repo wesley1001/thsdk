@@ -6,90 +6,28 @@ import time
 import logging
 import platform
 import ctypes as c
+import pandas as pd
 from zoneinfo import ZoneInfo
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
-from ._constants import FieldNameMap, MARKETS, BLOCK_MARKETS, rand_account, CALL_AUCTION_ANOMALY_MAP, \
-    market_to_market_id
+from ._constants import *
 
 __all__ = ['THS', 'Response']
+
+tz = ZoneInfo('Asia/Shanghai')
 
 if sys.version_info < (3, 9):
     raise RuntimeError("此程序需要 Python 3.9 或更高版本，当前版本为 {}.{}.{}".format(
         sys.version_info.major, sys.version_info.minor, sys.version_info.micro))
-
-tz = ZoneInfo('Asia/Shanghai')
 
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s]: %(message)s'
 )
+
 logger = logging.getLogger(__name__)
-
-
-def _int2time(scr: int) -> datetime:
-    """将整数时间戳转换为 datetime 对象。
-
-    Args:
-        scr (int): 整数时间戳，包含年、月、日、小时、分钟信息。
-
-    Returns:
-        datetime: 转换后的 datetime 对象，带亚洲/上海时区。
-
-    Raises:
-        ValueError: 如果时间戳无效。
-    """
-    try:
-        year = 2000 + ((scr & 133169152) >> 20) % 100
-        month = (scr & 983040) >> 16
-        day = (scr & 63488) >> 11
-        hour = (scr & 1984) >> 6
-        minute = scr & 63
-        return datetime(year, month, day, hour, minute, tzinfo=tz)
-    except ValueError as e:
-        raise ValueError(f"无效的时间整数: {scr}, 错误: {e}")
-
-
-def _convert_data_keys_list(data: List[Dict]) -> List[Dict]:
-    """转换数据字段名称为中文。
-
-    Args:
-        data (List[Dict]): 包含字段名称的字典列表。
-
-    Returns:
-        List[Dict]: 字段名称转换为中文后的字典列表。
-    """
-    converted_data = []
-    for entry in data:
-        converted_entry = {}
-        for key, value in entry.items():
-            key_int = int(key) if key.isdigit() else key
-            converted_entry[FieldNameMap.get(key_int, key)] = value
-        converted_data.append(converted_entry)
-    return converted_data
-
-
-def _convert_data_keys_dict(data: Dict) -> Dict:
-    """转换数据字段名称为中文。
-
-    Args:
-        data (List[Dict]): 包含字段名称的字典列表。
-
-    Returns:
-        List[Dict]: 字段名称转换为中文后的字典列表。
-    """
-    converted_data = {}
-    for key, value in data.items():
-        key_int = int(key) if key.isdigit() else key
-        converted_data[FieldNameMap.get(key_int, key)] = value
-    return converted_data
-
-
-class THSAPIError(Exception):
-    """API 异常基类。"""
-    pass
 
 
 @dataclass
@@ -113,144 +51,234 @@ class Payload:
         return f"Payload(result={result_str}, dict_extra={self.dict_extra!r})"
 
 
+@dataclass
 class Response:
-    """API 响应类，用于解析和处理 API 返回的 JSON 数据。
+    success: bool = field(init=False)  # 是否成功
+    error: str = field(default="", init=False)  # 错误信息
+    data: Optional[Union[Dict[str, Any], List[Dict], str]] = field(
+        default=None, init=False
+    )
+    extra: Dict[str, Any] = field(default_factory=dict, init=False)  # 额外字段
 
-    Attributes:
-        err_info (str): 错误信息，若为空表示成功。
-        payload (Payload): 响应数据对象。
-    """
-    err_info: str
-    payload: Payload
+    # 内部真实存储（只在 __post_init__ 中赋值）
+    _raw_json: str = field(repr=False, compare=False)
 
-    def __init__(self, json_str: str):
-        """初始化响应对象。
-
-        Args:
-            json_str (str): JSON 格式的响应字符串。
-
-        Notes:
-            如果 JSON 字符串无效，将记录错误并初始化为空数据。
-        """
+    def __post_init__(self) -> None:
+        """解析 JSON 并填充所有字段（只执行一次）"""
+        data_dict: Dict[str, Any] = {}
         try:
             try:
                 import orjson
-                # Use orjson if available
-                data_dict: Dict[str, Any] = orjson.loads(json_str.encode('utf-8'))
+                data_dict = orjson.loads(self._raw_json.encode("utf-8"))
             except ImportError:
                 import json
-                # Fallback to standard json if orjson is not available
-                data_dict: Dict[str, Any] = json.loads(json_str)
+                data_dict = json.loads(self._raw_json)
         except Exception as e:
-            data_dict: Dict[str, Any] = {}
-            print(f"无效的 JSON 字符串: {e}")
+            # JSON 解析失败 → 失败响应
+            self.success = False
+            self.error = f"无效的 JSON: {e}"
+            return
 
-        self.err_info = data_dict.get("err_info", "")
-
+        err_info = data_dict.get("err_info", "")
         payload_data = data_dict.get("payload", {})
+
         if not isinstance(payload_data, dict):
-            raise TypeError("payload must be a dictionary or None")
+            payload_data = {}
 
         result = payload_data.get("result")
-        if result is not None and not isinstance(result, (dict, list, str)):
-            raise TypeError("result must be a dictionary, list, string, or None")
-        if isinstance(result, list):
-            result = _convert_data_keys_list(result or [])
-
         dict_extra = payload_data.get("dict_extra", {})
-        if dict_extra is not None and not isinstance(dict_extra, dict):
-            raise TypeError("extra_data must be a dictionary or None")
-        if isinstance(dict_extra, dict):
-            dict_extra = _convert_data_keys_dict(dict_extra or {})
 
-        self.payload = Payload(result, dict_extra)
+        # === 数据转换：字段名转中文 ===
+        if isinstance(result, list):
+            result = self._convert_list(result) if result else []
+        # result 是 dict/str/None 不处理
+
+        if isinstance(dict_extra, dict):
+            dict_extra = self._convert_dict(dict_extra)
+        else:
+            dict_extra = {}
+
+        # === 填充字段 ===
+        self.success = not bool(err_info)
+        self.error = err_info
+        self.data = result
+        self.extra = dict_extra
+
+    # ==================== 静态转换方法 ====================
+    @staticmethod
+    def _convert_list(data: List[Dict]) -> List[Dict]:
+        return [Response._convert_item(item) for item in data]
+
+    @staticmethod
+    def _convert_dict(data: Dict) -> Dict:
+        return {Response._convert_key(k): v for k, v in data.items()}
+
+    @staticmethod
+    def _convert_item(item: Dict) -> Dict:
+        converted = {}
+        for k, v in item.items():
+            key = int(k) if k.isdigit() else k
+            converted[FieldNameMap.get(key, k)] = v
+        return converted
+
+    @staticmethod
+    def _convert_key(key: Any) -> Any:
+        key_int = int(key) if str(key).isdigit() else key
+        return FieldNameMap.get(key_int, key)
+
+    # ==================== 终极语法糖 ====================
+
+    def __bool__(self) -> bool:
+        """支持：if resp: """
+        return self.success
 
     def __repr__(self) -> str:
-        """返回对象的字符串表示。
+        data_str = ""
+        if isinstance(self.data, list):
+            if len(self.data) > 1:
+                data_str = f"[{self.data[0]!r}, ...] ({len(self.data)} items)"
+            else:
+                data_str = f"{self.data!r}"
+        elif isinstance(self.data, dict):
+            data_str = f"{self.data!r}"
+        else:
+            data_str = f"{self.data!r}"
+        return f"Response(success={self.success}, error={self.error!r}, data={data_str}, extra={self.extra!r})"
 
-        Returns:
-            str: 包含错误信息和数据对象的字符串表示。
-        """
-        return f"Response(err_info={self.err_info!r}, payload={self.payload})"
+    @property
+    def df(self):
+        """一键转 pandas.DataFrame（超级好用！）"""
+        try:
+            import pandas as pd
+        except ImportError as e:
+            raise ImportError("使用 .df 需要安装 pandas") from e
 
-    def is_success(self) -> bool:
-        """检查响应是否成功。
+        if self.data is None:
+            return pd.DataFrame()
 
-        Returns:
-            bool: 如果 err_info 为空，则返回 True，否则返回 False。
-        """
-        return not self.err_info
+        if isinstance(self.data, list):
+            return pd.DataFrame(self.data)
+        if isinstance(self.data, dict):
+            return pd.DataFrame([self.data])
 
-    def get_result(self) -> Optional[Union[Dict[str, Any], List[Any], str]]:
-        """获取 payload 的 result 字段。
+        raise TypeError(f"无法将 {type(self.data)} 转为 DataFrame")
 
-        Returns:
-            Optional[Union[Dict[str, Any], List[Any], str]]: result 字段的值。
-        """
-        return self.payload.result
-
-
-def error_response(err_info: str) -> Response:
-    """创建错误响应对象。
-
-    Args:
-        err_info (str): 错误信息字符串。
-
-    Returns:
-        Response: 包含错误信息和空 payload 的响应对象。
-    """
-    return Response(json.dumps({
-        "err_info": err_info,
-        "payload": {}
-    }))
+    # ==================== 类方法构造器（推荐使用方式）===================
+    @classmethod
+    def from_json(cls, json_str: str) -> "Response":
+        """推荐的创建方式"""
+        return cls(_raw_json=json_str)
 
 
 class THS:
-    """该类封装了与行情服务器的交互，支持获取 K 线、成交、板块等数据，以及实时数据订阅。
-    """
+    """THS数据访问类，提供市场数据获取接口"""
 
     def __init__(self, ops: Optional[Dict[str, Any]] = None):
-        """初始化 API 客户端。
+        """初始化 THS 数据访问客户端。
 
         Args:
-            ops (Dict[str, Any], optional): 配置信息，包含用户名、密码等。默认为 None，若未提供则使用随机账户。
+            ops (Dict[str, Any], optional): 配置信息，用于设置与行情服务器交互的参数。
+                如果未提供或使用 demo 账户，将自动使用临时游客账户（可能随时失效）。
+                
+                常用配置项包括：
+                - username (str): 您的账户用户名。
+                - password (str): 您的账户密码。
+                - mac (str): 设置固定mac。格式: XX:XX:XX:XX:XX:XX eg. "3e:8c:40:3e:0a:14"
+                
+                使用示例：
+                ```python
+                # 方式1：直接传入账户密码
+                ths = THS({
+                    "username": "your_username",
+                    "password": "your_password",
+                    "mac": "3e:8c:40:3e:0a:14",
+                })
+                
+                # 方式2：从环境变量读取
+                # 设置环境变量：env THS_USERNAME=your_username;THS_PASSWORD=your_password;THS_MAC=your_mac_address
+                ths = THS()  # 会自动从环境变量读取
+                
+                # 方式3：游客账户（仅用于测试，会自动切换为临时游客账户）
+                ths = THS()
+                ```
+                
+                账户配置优先级：
+                1. 用户传入的账户密码 username,password和mac
+                2. 环境变量 THS_USERNAME,THS_PASSWORD和THS_MAC
+                3. 临时游客账户（最低优先级，仅用于测试） 自动获取内置游客账户username,password和mac
+                
+                重要提示：
+                - 临时游客账户仅供测试使用，可能随时失效，不适合生产环境。
+                - 建议使用您自己的账户以确保服务稳定性和数据完整性。
+                - 账户信息仅用于连接行情服务器，不会上传或存储。
+                - 使用环境变量可以避免在代码中硬编码账户信息，更安全。
+
+        Attributes:
+            ops (Dict[str, Any]): 存储初始化时的配置信息。
         """
         ops = ops or {}
-        account = rand_account()
-        ops.setdefault("username", account[0])
-        ops.setdefault("password", account[1])
-        self.ops = ops
-        self._login = False
 
-        lib_path = ""
+        # 账户配置优先级：
+        # 1. 用户传入的账户密码（最高优先级）
+        # 2. 环境变量 THS_USERNAME 和 THS_PASSWORD
+        # 3. 临时游客账户（rand_account，最低优先级）
+
+        # 检查用户是否提供了完整的账户密码
+        has_user_credentials = "username" in ops and "password" in ops
+
+        if not has_user_credentials:
+            # 如果用户没有提供完整的账户密码，尝试从环境变量读取
+            env_username = os.getenv("THS_USERNAME")
+            env_password = os.getenv("THS_PASSWORD")
+            env_mac = os.getenv("THS_MAC")
+
+            if env_username and env_password:
+                # 从环境变量读取账户密码
+                ops.setdefault("username", env_username)
+                ops.setdefault("password", env_password)
+                ops.setdefault("mac", env_mac)
+                logger.info("✅ 已从环境变量读取账户配置")
+            else:
+                # 如果环境变量也没有，使用随机账户
+                account = rand_account()
+                ops.setdefault("username", account[0])
+                ops.setdefault("password", account[1])
+                ops.setdefault("mac", account[2])
+
+        # 检查mac是否在ops中，没有的话调用username映射mac地址
+        if "mac" not in ops:
+            ops.setdefault("mac", string_to_mac(ops.get("username")))
+
+        self.ops = ops
+        self._initialized = False
+
+        dll_path = ""
         system = platform.system()
         arch = platform.machine()
         base_dir = os.path.dirname(__file__)
         if system == 'Linux':
-            lib_path = os.path.join(base_dir, "libs", "linux", "hq.so")
+            dll_path = os.path.join(base_dir, "libs", "linux", "hq.so")
         elif system == 'Darwin':
             if arch == 'arm64':
-                raise THSAPIError('Apple M系列芯片暂不支持')
-            lib_path = os.path.join(base_dir, "libs", "darwin", 'hq.dylib')
+                raise Exception('Apple M系列芯片暂不支持')
+            dll_path = os.path.join(base_dir, "libs", "darwin", 'hq.dylib')
         elif system == 'Windows':
-            lib_path = os.path.join(base_dir, "libs", "windows", 'hq.dll')
-        if lib_path == "":
-            raise THSAPIError(f'不支持的操作系统: {system}')
+            dll_path = os.path.join(base_dir, "libs", "windows", 'hq.dll')
+        if dll_path == "":
+            raise Exception(f'不支持的操作系统: {system}')
 
         self._lib = None
 
-        self._callbacks = []
         try:
-            self._lib = c.CDLL(lib_path)
+            self._lib = c.CDLL(dll_path)
             self._lib.Call.argtypes = [
                 c.c_char_p,  # input: C 字符串指针
                 c.c_char_p,  # out: C 字符串指针
-                c.c_int,  # outLen: C 整数
-                c.c_void_p  # callback: 通用指针
+                c.c_int,  # outLen: C 缓冲区的最大长度
             ]
             self._lib.Call.restype = c.c_int  # 返回类型为 C 整数
         except OSError as e:
-            raise THSAPIError(f"加载动态链接库 {lib_path} 失败: {e}")
+            raise Exception(f"加载动态链接库 {dll_path} 失败: {e}")
 
     def __enter__(self):
         """上下文管理器入口，自动连接服务器。
@@ -265,8 +293,72 @@ class THS:
         """上下文管理器出口，自动断开服务器连接。"""
         self.disconnect()
 
+    @staticmethod
+    def get_err_info_by_code(code: int) -> str:
+        """
+        根据错误码获取错误信息。
+
+        Args:
+            code (int): 错误码
+
+        Returns:
+            str: 错误信息
+        """
+
+        return {
+            0: "成功",
+            -1: "输出缓冲区太小",
+            -2: "输入参数无效",
+            -3: "内部错误",
+            -4: "查询失败",
+            -5: "未连接到服务器",
+            -6: "请求超时"
+        }.get(code, f"未知错误码: {code}")
+
+    @staticmethod
+    def _error_response(err_info: str) -> Response:
+        """创建错误响应对象。
+
+        Args:
+            err_info (str): 错误信息字符串。
+
+        Returns:
+            Response: 包含错误信息和空 payload 的响应对象。
+        """
+        return Response(json.dumps({
+            "err_info": err_info,
+            "payload": {}
+        }))
+
+    """该类封装了与行情服务器的交互，支持获取 K 线、成交、板块等数据，以及实时数据订阅。
+    """
+
+    @staticmethod
+    def _int2time(scr: int) -> datetime:
+        """
+        将整数时间戳转换为 datetime 对象。
+
+        Args:
+            scr (int): 整数时间戳，包含年、月、日、小时、分钟信息。
+
+        Returns:
+            datetime: 转换后的 datetime 对象，带亚洲/上海时区。
+
+        Raises:
+            ValueError: 如果时间戳无效。
+        """
+        try:
+            year = 2000 + ((scr & 133169152) >> 20) % 100
+            month = (scr & 983040) >> 16
+            day = (scr & 63488) >> 11
+            hour = (scr & 1984) >> 6
+            minute = scr & 63
+            return datetime(year, month, day, hour, minute, tzinfo=tz)
+        except ValueError as e:
+            raise ValueError(f"无效的时间整数: {scr}, 错误: {e}")
+
     def lib_call(self, method: str, params: Optional[Union[str, dict, list]] = "",
-                 buffer_size: int = 1024 * 1024, callback: Optional[c.CFUNCTYPE] = None) -> tuple[int, str]:
+                 buffer_size: int = 1024 * 1024) -> tuple[int, str]:
         """调用 C 动态链接库的 Call 函数，处理所有行情服务操作。
                 内部方法，统一调用 C 动态链接库的 Call 函数，处理所有行情服务操作。
 
@@ -280,10 +372,7 @@ class THS:
                         - "help": 获取帮助信息
                     params: 请求字符串，具体内容取决于操作类型：
                         - connect: 账户信息配置字典[JSON]
-                        - unsubscribe: 订阅ID[STR]
                         - disconnect: [None]
-                    callback: 回调函数，仅对 subscribe 操作有效，用于接收实时推送数据。
-                              签名必须为 c.CFUNCTYPE(None, c_char_p)，接收 UTF-8 编码的 JSON 字符串。
                     buffer_size: 输出缓冲区大小（字节），默认为 1MB，需足够大以容纳返回数据。
 
                 Returns:
@@ -308,49 +397,45 @@ class THS:
         try:
             input_json_bytes = json.dumps(input_json).encode('utf-8')
         except (TypeError, ValueError) as e:
-            raise THSAPIError(f"JSON 序列化失败: {e}")
+            raise Exception(f"JSON 序列化失败: {e}")
 
         output_buffer = c.create_string_buffer(buffer_size)
         current_buffer_size = buffer_size
 
-        if callback:
-            self._callbacks.append(callback)
-
         try:
-            status = self._lib.Call(input_json_bytes, output_buffer, c.c_int(current_buffer_size), callback)
+            status = self._lib.Call(input_json_bytes, output_buffer, c.c_int(current_buffer_size))
             try:
                 result = output_buffer.value.decode('utf-8') if output_buffer.value else ""
             except UnicodeDecodeError:
-                raise THSAPIError("[thsdk] 输出缓冲区解码失败，可能包含非 UTF-8 数据")
+                raise Exception("[thsdk] 输出缓冲区解码失败，可能包含非 UTF-8 数据")
             return status, result
         finally:
-            del output_buffer
-            if callback in self._callbacks:
-                self._callbacks.remove(callback)
+            pass
 
     def call(self, method: str, params: Optional[Union[str, dict, list]] = "",
-             buffer_size: int = 1024 * 1024, callback: Optional[c.CFUNCTYPE] = None) -> Response:
-        if not self._login:
-            return error_response(f"未登录")
+             buffer_size: int = 1024 * 1024) -> Response:
+        if not self._initialized:
+            return self._error_response(f"未登录")
 
-        result_code, result = self.lib_call(method=method, params=params, buffer_size=buffer_size, callback=callback)
+        result_code, result = self.lib_call(method=method, params=params, buffer_size=buffer_size)
 
         if result_code == 0:
             response = Response(result)
-            if not response.is_success():
-                logger.info(f"call错误信息: {response.err_info}")
+            if not response:
+                logger.info(f"call错误信息: {response.error}")
             return response
         elif result_code == -1:
             current_size_mb = buffer_size / (1024 * 1024)
-            return error_response(
+            return self._error_response(
                 f"缓冲区大小不足,当前大小: {current_size_mb:.2f} MB,需要调整扩大 buffer_size 接收返回数据")
         elif result_code == -6:
             response = Response(result)
-            if not response.is_success():
-                logger.info(f"请求超时: {response.err_info}")
+            if not response:
+                logger.info(f"请求超时: {response.error}")
             return response
         else:
-            return error_response(f"错误代码: {result_code}, 未找到方法: {method}, 参数:{params}")
+            return self._error_response(
+                f"错误代码: {result_code},{self.get_err_info_by_code(result_code)}, 未找到方法: {method}, 参数:{params}")
 
     def connect(self, max_retries: int = 5) -> Response:
         """连接到行情服务器。
@@ -367,26 +452,41 @@ class THS:
         if not isinstance(max_retries, int) or max_retries <= 0:
             max_retries = 5
 
+        if self._initialized:
+            logger.warning("❌ 已处于登录状态，请先调用 disconnect() 断开连接后再重新连接。")
+            return self._error_response("❌ 已处于登录状态，请先断开连接（disconnect）后再重新连接。")
+
         for attempt in range(max_retries):
             try:
                 buffer_size = 1024 * 10
                 result_code, result = self.lib_call(method="connect", params=self.ops, buffer_size=buffer_size)
                 if result_code != 0:
-                    logger.error(f"❌ 错误代码: {result_code}, 连接失败")
-                    return error_response(f"错误代码: {result_code}, 连接失败")
+                    logger.error(
+                        f"❌ 错误代码: {result_code},{self.get_err_info_by_code(result_code)}, 连接失败 account:{self.ops.get('username', '')}")
+                    return self._error_response(
+                        f"错误代码: {result_code},{self.get_err_info_by_code(result_code)}, 连接失败 account:{self.ops.get('username', '')}")
                 response = Response(result)
 
-                if response.err_info == "":
-                    self._login = True
-                    logger.info("✅ 成功连接到服务器")
+                if response.error == "":
+                    self._initialized = True
+                    username = self.ops.get('username', '')
+                    mac = self.ops.get('mac', '')
+                    logger.info(f"✅ TCP成功连接到服务器 account:{username} mac:{mac}")
+                    if str(username).startswith("thsguest_"):
+                        logger.warning("=" * 80)
+                        logger.warning("⚠️  当前使用临时游客账户（仅供测试）")
+                        logger.warning("⚠️  临时账户可能随时失效，不适合生产环境使用")
+                        logger.warning("⚠️  建议使用您自己的账户以确保服务稳定性")
+                        logger.warning("⚠️  配置方式：THS({'username': 'your_username', 'password': 'your_password', 'mac': 'your_mac_address'})")
+                        logger.warning("=" * 80)
                     return response
                 else:
-                    logger.warning(f"❌ 第 {attempt + 1} 次连接尝试失败: {response.err_info}")
+                    logger.warning(f"❌ 第 {attempt + 1} 次连接尝试失败: {response.error}")
             except Exception as e:
                 logger.error(f"❌ 连接报错: {e}")
             time.sleep(2 ** attempt)
         logger.error(f"❌ 尝试 {max_retries} 次后连接失败")
-        return error_response(f"尝试 {max_retries} 次后连接失败")
+        return self._error_response(f"尝试 {max_retries} 次后连接失败")
 
     def disconnect(self):
         """断开与行情服务器的连接。
@@ -394,12 +494,12 @@ class THS:
         Notes:
             如果未连接，则记录已断开信息。
         """
-        if self._login:
-            self._login = False
+        if self._initialized:
+            self._initialized = False
             self.lib_call("disconnect")
-            logger.info("✅ 已成功断开与行情服务器的连接")
+            logger.info(f"✅ 已成功断开与行情服务器的连接 account:{self.ops.get('username', '')}")
         else:
-            logger.info("✅ 已经断开连接")
+            logger.info(f"✅ 已经断开连接 account:{self.ops.get('username', '')}")
 
     def query_data(self, params: dict, buffer_size: int = 1024 * 1024 * 2, max_attempts=5) -> Response:
         """查询行情数据指令
@@ -416,8 +516,8 @@ class THS:
             如果未登录，返回未授权响应。
             如果缓冲区不足，会自动扩大缓冲区并重试。
         """
-        if not self._login:
-            return error_response(f"未登录")
+        if not self._initialized:
+            return self._error_response(f"未登录")
 
         attempt = 0
         while attempt < max_attempts:
@@ -426,8 +526,8 @@ class THS:
 
             if result_code == 0:
                 response = Response(result)
-                if not response.is_success():
-                    logger.info(f"查询数据错误信息: {response.err_info}")
+                if not response:
+                    logger.info(f"查询数据错误信息: {response.error}")
                 return response
             elif result_code == -1:
                 current_size_mb = buffer_size / (1024 * 1024)
@@ -438,14 +538,45 @@ class THS:
                 buffer_size *= 2
                 attempt += 1
                 if attempt == max_attempts:
-                    return error_response(f"达到最大尝试次数，错误代码: {result_code}, "
-                                          f"请求: {params}, 最终缓冲区大小: {buffer_size}")
+                    return self._error_response(
+                        f"达到最大尝试次数，错误代码: {result_code},{self.get_err_info_by_code(result_code)} "
+                        f"请求: {params}, 最终缓冲区大小: {buffer_size}")
             else:
-                return error_response(f"错误代码: {result_code}, 未找到请求数据: {params}")
+                return self._error_response(
+                    f"错误代码: {result_code},{self.get_err_info_by_code(result_code)}, 未找到请求数据: {params}")
 
-        return error_response(f"意外错误: 达到最大尝试次数，请求: {params}")
+        return self._error_response(f"意外错误: 达到最大尝试次数，请求: {params}")
 
-    def block_data(self, block_id: int) -> Response:
+    def intraday_data(self, ths_code: str) -> Response:
+        """
+        日内分时数据
+        :param ths_code: 
+        :return: 
+        """"""
+
+        Args:
+            ths_code (str): 证券代码，格式为10位，以 'USHA' 或 'USZA' 开头。
+
+        Returns:
+            Response: 包含成交数据的响应对象。若代码无效，返回 `err_info`。
+        """
+        ths_code = ths_code.upper()
+        if len(ths_code) != 10 or not any(ths_code.upper().startswith(market) for market in MARKETS):
+            return self._error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 开头")
+
+        params = {
+            "code": ths_code,
+            "date": "0"
+        }
+
+        response = self.call(method="intraday_data", params=params)
+        if response.error == "":
+            for entry in response.data:
+                if "时间" in entry:
+                    entry["时间"] = self._int2time(int(entry["时间"]))
+        return response
+
+    def block(self, block_id: int) -> Response:
         """获取板块数据。
 
         Args:
@@ -491,14 +622,11 @@ class THS:
                         0xD8D4 小公募
 
         Returns:
-            Response: 包含板块数据的响应对象。
-
-        Raises:
-            ValueError: 如果 block_id 未提供。
+            Response: 包含板块数据的响应对象。若 `block_id` 无效，返回 `err_info`。
         """
 
         if not block_id:
-            return error_response("必须提供板块 ID")
+            return self._error_response("必须提供板块 ID")
 
         params = {
             "block_id": block_id,
@@ -507,27 +635,27 @@ class THS:
         return self.call(method="block_data", params=params)
 
     def market_block(self, market: str) -> Response:
-        """获取板块数据。
+        """获取特定市场的板块数据。
 
         Args:
-            UFXB 基本汇率
-            UFXC 交叉汇率
-            UFXR 反向汇率
-            UIFF 中金所
-            UCFS 上期所
-            UCFD 大商所
-            UCFZ 郑商所
-
+            market (str): 市场代码，例如：
+                - "UFXB": 基本汇率
+                - "UFXC": 交叉汇率
+                - "UFXR": 反向汇率
+                - "UIFF": 中金所
+                - "UCFS": 上期所
+                - "UCFD": 大商所
+                - "UCFZ": 郑商所
 
         Returns:
             Response: 包含板块数据的响应对象。
 
         Raises:
-            ValueError: 如果 block_id 未提供。
+            ValueError: 如果未提供 market。
         """
 
         if not market:
-            return error_response("必须提供market")
+            return self._error_response("必须提供market")
 
         params = {
             "market": market,
@@ -535,79 +663,7 @@ class THS:
 
         return self.call(method="market_block", params=params)
 
-    def subscribe_test(self, callback: c.CFUNCTYPE) -> Response:
-        """订阅实测试时行情数据。
-
-        Args:
-            callback (c.CFUNCTYPE): 回调函数，用于处理订阅数据，需为 c.CFUNCTYPE(None, c_char_p) 类型。
-
-        Returns:
-            Response: 包含订阅结果的响应对象。
-        """
-        result_code, result = self.lib_call(method=f'subscribe.test', callback=callback)
-        if result_code == 0:
-            response = Response(result)
-            if not response.is_success():
-                logger.info(f"订阅错误信息: {response.err_info}")
-            return response
-        else:
-            return error_response(f"错误代码: {result_code}, 测试订阅失败")
-
-    def subscribe_tick(self, ths_code: str, callback: c.CFUNCTYPE) -> Response:
-        """RESTRICTED: 订阅3秒tick snapshot推送 (订阅类被限制不再公开开放)
-
-        Args:
-            callback (c.CFUNCTYPE): 回调函数，用于处理订阅数据，需为 c.CFUNCTYPE(None, c_char_p) 类型。
-
-        Returns:
-            Response: 包含订阅结果的响应对象。
-        """
-        result_code, result = self.lib_call(method=f'subscribe.tick', params=ths_code, callback=callback)
-        if result_code == 0:
-            response = Response(result)
-            if not response.is_success():
-                logger.info(f"订阅错误信息: {response.err_info}")
-            return response
-        else:
-            return error_response(f"错误代码: {result_code}, 测试订阅失败")
-
-    def subscribe_l2(self, ths_code: str, callback: c.CFUNCTYPE) -> Response:
-        """RESTRICTED: 订阅l2成交推送 (订阅类被限制不再公开开放)
-
-        Args:
-            callback (c.CFUNCTYPE): 回调函数，用于处理订阅数据，需为 c.CFUNCTYPE(None, c_char_p) 类型。
-
-        Returns:
-            Response: 包含订阅结果的响应对象。
-        """
-        result_code, result = self.lib_call(method=f'subscribe.l2', params=ths_code, callback=callback)
-        if result_code == 0:
-            response = Response(result)
-            if not response.is_success():
-                logger.info(f"订阅错误信息: {response.err_info}")
-            return response
-        else:
-            return error_response(f"错误代码: {result_code}, 测试订阅失败")
-
-    def unsubscribe(self, subscribe_id: str) -> Response:
-        """取消订阅实时行情数据。
-
-        Args:
-            subscribe_id (str): 订阅 ID，由 subscribe 方法返回。
-
-        Returns:
-            Response: 包含取消订阅结果的响应对象。
-        """
-        result_code, result = self.lib_call("unsubscribe", subscribe_id)
-        if result_code == 0:
-            response = Response(result)
-            if not response.is_success():
-                logger.info(f"订阅错误信息: {response.err_info}")
-            return response
-        else:
-            return error_response(f"错误代码: {result_code}, 退订失败: {subscribe_id}")
-
-    def block_components(self, link_code: str) -> Response:
+    def block_constituents(self, link_code: str) -> Response:
         """获取板块成分股数据。
 
         Args:
@@ -621,13 +677,13 @@ class THS:
         """
 
         if not link_code:
-            return error_response("必须提供板块代码")
+            return self._error_response("必须提供板块代码")
 
         params = {
             "link_code": link_code,
         }
 
-        return self.call(method="block_components", params=params)
+        return self.call(method="block_constituents", params=params)
 
     def tick_level1(self, ths_code: str) -> Response:
         """获取3秒 tick 成交数据。
@@ -636,15 +692,11 @@ class THS:
             ths_code (str): 证券代码，格式为10位，以 'USHA' 或 'USZA' 开头。
 
         Returns:
-            Response: 包含成交数据的响应对象。
-
-        Raises:
-            InvalidCodeError: 如果证券代码格式无效。
-            ValueError: 如果开始时间戳大于或等于结束时间戳。
+            Response: 包含成交数据的响应对象。若代码无效，返回 `err_info`。
         """
         ths_code = ths_code.upper()
         if len(ths_code) != 10 or not any(ths_code.upper().startswith(market) for market in MARKETS):
-            return error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 开头")
+            return self._error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 开头")
 
         params = {
             "code": ths_code,
@@ -662,30 +714,65 @@ class THS:
 
 
         Returns:
-            Response: 包含超级盘口数据的响应对象。
-
-        Raises:
-            InvalidCodeError: 如果证券代码格式无效。
-            ValueError: 如果开始时间戳大于或等于结束时间戳。
+            Response: 包含超级盘口数据的响应对象。若参数无效，返回 `err_info`。
         """
         ths_code = ths_code.upper()
         if len(ths_code) != 10 or not any(ths_code.upper().startswith(market) for market in MARKETS):
-            return error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 开头")
+            return self._error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 开头")
 
         if date:
             try:
                 datetime.strptime(date, "%Y%m%d")
             except ValueError:
-                return error_response("日期格式无效，必须为 'YYYYMMDD'")
+                return self._error_response("日期格式无效，必须为 'YYYYMMDD'")
 
         params = {
             "code": ths_code,
             "date": date,
         }
 
-        print(params)
-
         return self.call(method="tick.super_level1", params=params, buffer_size=buffer_size)
+
+    def min_snapshot(self, ths_code: str, date: Optional[str] = None,
+                     buffer_size: int = 1024 * 1024 * 2) -> Response:
+        """历史分时
+
+        Args:
+            ths_code (str): 证券代码，格式为10位，以 'USHA' 或 'USZA' 开头。
+            date (Optional[str]): 查询历史日期字符串，近一年，格式为 'YYYYMMDD'。
+
+
+        Returns:
+            Response: 包含超级盘口数据的响应对象。若参数无效，返回 `err_info`。
+        """
+        ths_code = ths_code.upper()
+        if len(ths_code) != 10 or not any(ths_code.upper().startswith(market) for market in MARKETS):
+            return self._error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 开头")
+
+        if date:
+            try:
+                datetime.strptime(date, "%Y%m%d")
+            except ValueError:
+                return self._error_response("日期格式无效，必须为 'YYYYMMDD'")
+
+        params = {
+            "code": ths_code,
+            "date": date,
+        }
+        response = self.call(method="min_snapshot", params=params, buffer_size=buffer_size)
+        if response.error == "":
+            # 过滤掉所有'成交量'==4294967295的条目
+            filtered_data = []
+            for entry in response.data:
+                if "成交量" in entry and entry["成交量"] == 4294967295:
+                    continue  # 跳过该条数据
+                # 完善数据，转换时间字段
+                if "时间" in entry:
+                    entry["时间"] = int(self._int2time(int(entry["时间"])).timestamp())
+                filtered_data.append(entry)
+            response.data = filtered_data
+
+        return response
 
     def ths_industry(self) -> Response:
         """获取行业板块数据。
@@ -693,7 +780,7 @@ class THS:
         Returns:
             Response: 包含行业板块数据的响应对象。
         """
-        return self.block_data(0xCE5F)
+        return self.block(0xCE5F)
 
     def ths_concept(self) -> Response:
         """获取概念板块数据。
@@ -701,7 +788,7 @@ class THS:
         Returns:
             Response: 包含概念板块数据的响应对象。
         """
-        return self.block_data(0xCE5E)
+        return self.block(0xCE5E)
 
     def forex_list(self) -> Response:
         """基本汇率。
@@ -717,23 +804,23 @@ class THS:
         Returns:
             Response: 包含指数板块数据的响应对象。
         """
-        return self.block_data(0xD2)
+        return self.block(0xD2)
 
     def stock_cn_lists(self):
         """A股"""
-        return self.block_data(0xE)
+        return self.block(0xE)
 
     def stock_us_lists(self):
         """美股"""
-        return self.block_data(0xDC47)
+        return self.block(0xDC47)
 
     def stock_hk_lists(self):
         """港股"""
-        return self.block_data(0xB)
+        return self.block(0xB)
 
     def stock_bj_lists(self):
         """北交所"""
-        return self.block_data(0xCA8B)
+        return self.block(0xCA8B)
 
     def stock_uk_lists(self):
         """英国"""
@@ -741,30 +828,35 @@ class THS:
 
     def stock_b_lists(self):
         """B股"""
-        return self.block_data(0xF)
+        return self.block(0xF)
 
     def futures_lists(self):
         """主力合约"""
-        return self.block_data(0xCAE0)
+        return self.block(0xCAE0)
 
     def option_lists(self):
-        pass
+        """期权列表（未实现）。
+
+        Notes:
+            暂无后端接口说明，调用将抛出未实现错误。
+        """
+        raise NotImplementedError("option_lists 尚未实现")
 
     def nasdaq_lists(self):
         """纳斯达克"""
-        return self.block_data(0xD9A9)
+        return self.block(0xD9A9)
 
     def bond_lists(self) -> Response:
         """可转债"""
-        return self.block_data(0xCE14)
+        return self.block(0xCE14)
 
     def fund_etf_lists(self) -> Response:
         """ETF基金"""
-        return self.block_data(0xCFF3)
+        return self.block(0xCFF3)
 
     def fund_etf_t0_lists(self) -> Response:
         """ETF T+0基金"""
-        return self.block_data(0xD90C)
+        return self.block(0xD90C)
 
     def depth(self, ths_code: Union[str, list]) -> Response:
         """获取深度数据 5档。
@@ -786,17 +878,38 @@ class THS:
             ths_code (str): 证券代码，格式为10位，以 'USHA','USZA','USHD','USZD' 等开头。
 
         Returns:
-            Response:
+            Response: 包含集合竞价数据的响应对象。若代码无效，返回 `err_info`。
         """
         ths_code = ths_code.upper()
         if len(ths_code) != 10 or not any(ths_code.upper().startswith(market) for market in MARKETS):
-            return error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 等开头")
+            return self._error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 等开头")
 
         params = {
             "code": ths_code,
         }
 
         response = self.call(method="call_auction", params=params)
+
+        return response
+
+    def big_order_flow(self, ths_code: str) -> Response:
+        """大单数据
+
+        Args:
+            ths_code (str): 证券代码，格式为10位，以 'USHA','USZA' 开头。
+
+        Returns:
+            Response: 包含集合竞价数据的响应对象。若代码无效，返回 `err_info`。
+        """
+        ths_code = ths_code.upper()
+        if len(ths_code) != 10 or not any(ths_code.upper().startswith(market) for market in ["USHA", "USZA"]):
+            return self._error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 等开头")
+
+        params = {
+            "code": ths_code,
+        }
+
+        response = self.call(method="big_order_flow", params=params)
 
         return response
 
@@ -807,11 +920,11 @@ class THS:
             market (str): 市场， 'USHA','USZA'
 
         Returns:
-            Response:
+            Response: 包含竞价异动数据的响应对象。若参数无效，返回 `err_info`。
         """
         market = market.upper()
-        if len(market) != 4 or not any(market.upper().startswith(market) for market in MARKETS):
-            return error_response("证券代码必须为4个字符，且以 'USHA' 或 'USZA' 等开头")
+        if len(market) != 4 or market not in MARKETS:
+            return self._error_response("市场代码必须为4个字符，并且属于有效市场代码")
 
         params = {
             "market": market,
@@ -819,9 +932,9 @@ class THS:
 
         response = self.call(method="call_auction_anomaly", params=params)
 
-        if response.payload.result and isinstance(response.payload.result, list):
+        if response.data and isinstance(response.data, list):
             ydkey = "异动类型1"
-            for entry in response.payload.result:
+            for entry in response.data:
                 if isinstance(entry, dict) and ydkey in entry:
                     entry[ydkey] = CALL_AUCTION_ANOMALY_MAP.get(entry[ydkey], entry[ydkey])
 
@@ -834,11 +947,11 @@ class THS:
             ths_code (str): 证券代码，格式为10位，以 'USHA','USZA' 等开头。
 
         Returns:
-            Response:
+            Response: 包含权息资料的响应对象。若代码无效，返回 `err_info`。
         """
         ths_code = ths_code.upper()
         if len(ths_code) != 10 or not any(ths_code.upper().startswith(market) for market in MARKETS):
-            return error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 等开头")
+            return self._error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 等开头")
 
         params = {
             "code": ths_code,
@@ -881,11 +994,11 @@ class THS:
 
         ths_code = ths_code.upper()
         if len(ths_code) != 10 or not any(ths_code.upper().startswith(market) for market in MARKETS):
-            return error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 开头")
+            return self._error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 开头")
         if adjust not in ["forward", "backward", ""]:
-            return error_response(f"无效的复权类型: {adjust}")
+            return self._error_response(f"无效的复权类型: {adjust}")
         if interval not in ["1m", "5m", "15m", "30m", "60m", "120m", "day", "week", "month", "quarter", "year"]:
-            return error_response(f"无效的周期类型: {interval}")
+            return self._error_response(f"无效的周期类型: {interval}")
 
         params = {
             "code": ths_code,
@@ -906,13 +1019,13 @@ class THS:
                 params["end_time"] = end_time.astimezone(tz).strftime('%Y-%m-%d %H:%M:%S')
 
         response = self.call(method="klines", params=params)
-        if response.err_info == "":
+        if response.error == "":
             if interval in ["1m", "5m", "15m", "30m", "60m", "120m"]:
-                for entry in response.get_result():
+                for entry in response.data:
                     if "时间" in entry:
-                        entry["时间"] = _int2time(int(entry["时间"]))
+                        entry["时间"] = self._int2time(int(entry["时间"]))
             else:
-                for entry in response.get_result():
+                for entry in response.data:
                     if "时间" in entry:
                         entry["时间"] = datetime.strptime(str(entry["时间"]), "%Y%m%d")
         return response
@@ -924,7 +1037,7 @@ class THS:
             condition (str): 查询条件，如 "所属行业"。
 
         Returns:
-            Response: 包含查询结果的响应对象。
+            Response: 包含查询结果的响应对象。若条件无效，返回 `err_info`。
         """
         return self.call("wencai_base", condition)
 
@@ -935,7 +1048,7 @@ class THS:
             condition (str): 查询条件，如 "涨停;所属行业;所属概念;热度排名;流通市值"。
 
         Returns:
-            Response: 包含查询结果的响应对象。
+            Response: 包含查询结果的响应对象。若条件无效，返回 `err_info`。
         """
         return self.call("wencai_nlp", condition, buffer_size=1024 * 1024 * 8)
 
@@ -971,10 +1084,10 @@ class THS:
         """获取板块市场数据。
 
         Args:
-            block_code (str or List[str]): 板块，格式为10位，
+            block_code (str | List[str]): 板块代码，长度10，前4位为市场代码。
 
         Returns:
-            Response: 包含股票市场数据的响应对象。
+            Response: 包含板块市场数据的响应对象。若参数无效，返回 `err_info`。
 
         Raises:
             InvalidCodeError: 如果证券代码格式无效或多个代码的市场不一致。
@@ -987,21 +1100,21 @@ class THS:
 
         # 验证查询键是否有效
         if query_key not in QUERY_CONFIG:
-            return error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
+            return self._error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
 
         if isinstance(block_code, str):
             block_code = [block_code]
         elif not isinstance(block_code, list) or not all(isinstance(code, str) for code in block_code):
-            return error_response("block_code 必须是字符串或者字符串列表")
+            return self._error_response("block_code 必须是字符串或者字符串列表")
 
         for code in block_code:
             code = code.upper()
             if len(code) != 10 or not any(code.upper().startswith(market) for market in BLOCK_MARKETS):
-                return error_response("板块代码必须为10个字符")
+                return self._error_response("板块代码必须为10个字符")
 
         markets = {code[:4] for code in block_code}
         if len(markets) > 1:
-            return error_response("一次性查询多支股票必须市场代码相同")
+            return self._error_response("一次性查询多支股票必须市场代码相同")
 
         market = markets.pop()
         short_codes = ",".join([code[4:] for code in block_code])
@@ -1020,10 +1133,10 @@ class THS:
         """获取股票市场数据。
 
         Args:
-            ths_code (str or List[str]): 证券代码，格式为10位，以 'USHA' 或 'USZA' 开头，可为单个代码或代码列表。
+            ths_code (str | List[str]): 证券代码（或列表）。长度10，前4位为市场代码。
 
         Returns:
-            Response: 包含股票市场数据的响应对象。
+            Response: 包含股票市场数据的响应对象。若参数无效，返回 `err_info`。
 
         Raises:
             InvalidCodeError: 如果证券代码格式无效或多个代码的市场不一致。
@@ -1043,21 +1156,21 @@ class THS:
         }
         # 验证查询键是否有效
         if query_key not in QUERY_CONFIG:
-            return error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
+            return self._error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
 
         if isinstance(ths_code, str):
             ths_code = [ths_code]
         elif not isinstance(ths_code, list) or not all(isinstance(code, str) for code in ths_code):
-            return error_response("ths_code 必须是字符串或者字符串列表")
+            return self._error_response("ths_code 必须是字符串或者字符串列表")
 
         for code in ths_code:
             code = code.upper()
             if len(code) != 10 or not any(code.upper().startswith(market) for market in MARKETS):
-                return error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 开头")
+                return self._error_response("证券代码必须为10个字符，且以 'USHA' 或 'USZA' 开头")
 
         markets = {code[:4] for code in ths_code}
         if len(markets) > 1:
-            return error_response("一次性查询多支股票必须市场代码相同")
+            return self._error_response("一次性查询多支股票必须市场代码相同")
 
         market = markets.pop()
         short_codes = ",".join([code[4:] for code in ths_code])
@@ -1076,10 +1189,10 @@ class THS:
         """us股票市场数据。
 
         Args:
-            ths_code (str or List[str]): 证券代码，格式为10位，以 'UNQQ' 或 'UNQS' 开头，可为单个代码或代码列表。
+            ths_code (str | List[str]): 证券代码（或列表）。至少4位，前4位为市场代码。
 
         Returns:
-            Response: 包含股票市场数据的响应对象。
+            Response: 包含股票市场数据的响应对象。若参数无效，返回 `err_info`。
 
         Raises:
             InvalidCodeError: 如果证券代码格式无效或多个代码的市场不一致。
@@ -1094,21 +1207,21 @@ class THS:
         }
         # 验证查询键是否有效
         if query_key not in QUERY_CONFIG:
-            return error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
+            return self._error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
 
         if isinstance(ths_code, str):
             ths_code = [ths_code]
         elif not isinstance(ths_code, list) or not all(isinstance(code, str) for code in ths_code):
-            return error_response("ths_code 必须是字符串或者字符串列表")
+            return self._error_response("ths_code 必须是字符串或者字符串列表")
 
         for code in ths_code:
             code = code.upper()
             if len(code) < 4 or not any(code.upper().startswith(market) for market in MARKETS):
-                return error_response("证券代码必须为10个字符，且以 'UNQQ' 或 'UNQS' 开头")
+                return self._error_response("证券代码必须至少4个字符，且以有效市场代码开头")
 
         markets = {code[:4] for code in ths_code}
         if len(markets) > 1:
-            return error_response("一次性查询多支股票必须市场代码相同")
+            return self._error_response("一次性查询多支股票必须市场代码相同")
 
         market = markets.pop()
         short_codes = ",".join([code[4:] for code in ths_code])
@@ -1129,12 +1242,11 @@ class THS:
         """获取香港股票市场数据，根据指定的查询键选择数据类型。
 
         Args:
-            ths_code (str or List[str]): 证券代码，格式为10位，以 'UNQQ' 或 'UNQS' 开头。
-                                        可为单个代码或代码列表。
+            ths_code (str | List[str]): 证券代码（或列表）。至少4位，前4位为市场代码。
             query_key (str): 查询键，用于选择数据类型和ID配置。可选值：
 
         Returns:
-            Response: 包含股票市场数据的响应对象。
+            Response: 包含股票市场数据的响应对象。若参数无效，返回 `err_info`。
 
         Raises:
             InvalidCodeError: 如果证券代码格式无效或多个代码的市场不一致。
@@ -1149,24 +1261,24 @@ class THS:
 
         # 验证查询键是否有效
         if query_key not in QUERY_CONFIG:
-            return error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
+            return self._error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
 
         # 将单一字符串转换为列表以统一处理
         if isinstance(ths_code, str):
             ths_code = [ths_code]
         elif not isinstance(ths_code, list) or not all(isinstance(code, str) for code in ths_code):
-            return error_response("ths_code 必须是字符串或字符串列表")
+            return self._error_response("ths_code 必须是字符串或字符串列表")
 
         # 验证证券代码格式
         for code in ths_code:
             code = code.upper()
             if len(code) < 4 or not any(code.startswith(market) for market in MARKETS):
-                return error_response("证券代码必须至少4个字符，且以有效市场代码开头")
+                return self._error_response("证券代码必须至少4个字符，且以有效市场代码开头")
 
         # 检查市场代码是否一致
         markets = {code[:4] for code in ths_code}
         if len(markets) > 1:
-            return error_response("所有股票代码必须属于同一市场")
+            return self._error_response("所有股票代码必须属于同一市场")
 
         # 准备查询参数
         market = markets.pop()  # 获取唯一的市场代码
@@ -1187,11 +1299,11 @@ class THS:
         """英国市场
 
         Args:
-            ths_code (str or List[str]):
+            ths_code (str | List[str]): 证券代码（或列表）。至少4位，前4位为市场代码。
             query_key (str): 查询键，用于选择数据类型和ID配置。可选值：
 
         Returns:
-            Response:
+            Response: 包含英国市场数据的响应对象。若参数无效，返回 `err_info`。
 
         Raises:
             InvalidCodeError:
@@ -1207,24 +1319,24 @@ class THS:
 
         # 验证查询键是否有效
         if query_key not in QUERY_CONFIG:
-            return error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
+            return self._error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
 
         # 将单一字符串转换为列表以统一处理
         if isinstance(ths_code, str):
             ths_code = [ths_code]
         elif not isinstance(ths_code, list) or not all(isinstance(code, str) for code in ths_code):
-            return error_response("ths_code 必须是字符串或字符串列表")
+            return self._error_response("ths_code 必须是字符串或字符串列表")
 
         # 验证证券代码格式
         for code in ths_code:
             code = code.upper()
             if len(code) < 4 or not any(code.startswith(market) for market in MARKETS):
-                return error_response("证券代码必须至少4个字符，且以有效市场代码开头")
+                return self._error_response("证券代码必须至少4个字符，且以有效市场代码开头")
 
         # 检查市场代码是否一致
         markets = {code[:4] for code in ths_code}
         if len(markets) > 1:
-            return error_response("所有股票代码必须属于同一市场")
+            return self._error_response("所有股票代码必须属于同一市场")
 
         # 准备查询参数
         market = markets.pop()  # 获取唯一的市场代码
@@ -1245,11 +1357,11 @@ class THS:
         """债
 
         Args:
-            ths_code (str or List[str]):
+            ths_code (str | List[str]): 债券代码（或列表）。至少4位，前4位为市场代码。
             query_key (str): 查询键，用于选择数据类型和ID配置。可选值：
 
         Returns:
-            Response:
+            Response: 包含债券市场数据的响应对象。若参数无效，返回 `err_info`。
 
         Raises:
             InvalidCodeError:
@@ -1263,24 +1375,24 @@ class THS:
 
         # 验证查询键是否有效
         if query_key not in QUERY_CONFIG:
-            return error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
+            return self._error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
 
         # 将单一字符串转换为列表以统一处理
         if isinstance(ths_code, str):
             ths_code = [ths_code]
         elif not isinstance(ths_code, list) or not all(isinstance(code, str) for code in ths_code):
-            return error_response("ths_code 必须是字符串或字符串列表")
+            return self._error_response("ths_code 必须是字符串或字符串列表")
 
         # 验证证券代码格式
         for code in ths_code:
             code = code.upper()
             if len(code) < 4 or not any(code.startswith(market) for market in MARKETS):
-                return error_response("证券代码必须至少4个字符，且以有效市场代码开头")
+                return self._error_response("证券代码必须至少4个字符，且以有效市场代码开头")
 
         # 检查市场代码是否一致
         markets = {code[:4] for code in ths_code}
         if len(markets) > 1:
-            return error_response("所有股票代码必须属于同一市场")
+            return self._error_response("所有股票代码必须属于同一市场")
 
         # 准备查询参数
         market = markets.pop()  # 获取唯一的市场代码
@@ -1301,11 +1413,11 @@ class THS:
         """基金ETF
 
         Args:
-            ths_code (str or List[str]):
+            ths_code (str | List[str]): 基金代码（或列表）。至少4位，前4位为市场代码。
             query_key (str): 查询键，用于选择数据类型和ID配置。可选值：
 
         Returns:
-            Response:
+            Response: 包含基金市场数据的响应对象。若参数无效，返回 `err_info`。
 
         Raises:
             InvalidCodeError:
@@ -1319,24 +1431,24 @@ class THS:
 
         # 验证查询键是否有效
         if query_key not in QUERY_CONFIG:
-            return error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
+            return self._error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
 
         # 将单一字符串转换为列表以统一处理
         if isinstance(ths_code, str):
             ths_code = [ths_code]
         elif not isinstance(ths_code, list) or not all(isinstance(code, str) for code in ths_code):
-            return error_response("ths_code 必须是字符串或字符串列表")
+            return self._error_response("ths_code 必须是字符串或字符串列表")
 
         # 验证证券代码格式
         for code in ths_code:
             code = code.upper()
             if len(code) < 4 or not any(code.startswith(market) for market in MARKETS):
-                return error_response("证券代码必须至少4个字符，且以有效市场代码开头")
+                return self._error_response("证券代码必须至少4个字符，且以有效市场代码开头")
 
         # 检查市场代码是否一致
         markets = {code[:4] for code in ths_code}
         if len(markets) > 1:
-            return error_response("所有股票代码必须属于同一市场")
+            return self._error_response("所有股票代码必须属于同一市场")
 
         # 准备查询参数
         market = markets.pop()  # 获取唯一的市场代码
@@ -1357,11 +1469,11 @@ class THS:
         """期货
 
         Args:
-            ths_code (str or List[str]):
+            ths_code (str | List[str]): 期货合约代码（或列表）。至少4位，前4位为市场代码。
             query_key (str): 查询键，用于选择数据类型和ID配置。可选值：
 
         Returns:
-            Response:
+            Response: 包含期货市场数据的响应对象。若参数无效，返回 `err_info`。
 
         Raises:
             InvalidCodeError:
@@ -1375,24 +1487,24 @@ class THS:
 
         # 验证查询键是否有效
         if query_key not in QUERY_CONFIG:
-            return error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
+            return self._error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
 
         # 将单一字符串转换为列表以统一处理
         if isinstance(ths_code, str):
             ths_code = [ths_code]
         elif not isinstance(ths_code, list) or not all(isinstance(code, str) for code in ths_code):
-            return error_response("ths_code 必须是字符串或字符串列表")
+            return self._error_response("ths_code 必须是字符串或字符串列表")
 
         # 验证证券代码格式
         for code in ths_code:
             code = code.upper()
             if len(code) < 4 or not any(code.startswith(market) for market in MARKETS):
-                return error_response("证券代码必须至少4个字符，且以有效市场代码开头")
+                return self._error_response("证券代码必须至少4个字符，且以有效市场代码开头")
 
         # 检查市场代码是否一致
         markets = {code[:4] for code in ths_code}
         if len(markets) > 1:
-            return error_response("所有股票代码必须属于同一市场")
+            return self._error_response("所有股票代码必须属于同一市场")
 
         # 准备查询参数
         market = markets.pop()  # 获取唯一的市场代码
@@ -1413,11 +1525,11 @@ class THS:
         """汇率市场数据
 
         Args:
-            ths_code (str or List[str]): 代码
-            query_key (str):
+            ths_code (str | List[str]): 外汇代码（或列表）。至少4位，前4位为市场代码。
+            query_key (str): 查询键，用于选择数据类型和ID配置。
 
         Returns:
-            Response: 包含股票市场数据的响应对象。
+            Response: 包含汇率市场数据的响应对象。若参数无效，返回 `err_info`。
 
         """
         # 查询键配置字典，映射查询键到对应的ID和数据类型
@@ -1429,24 +1541,24 @@ class THS:
 
         # 验证查询键是否有效
         if query_key not in QUERY_CONFIG:
-            return error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
+            return self._error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
 
         # 将单一字符串转换为列表以统一处理
         if isinstance(ths_code, str):
             ths_code = [ths_code]
         elif not isinstance(ths_code, list) or not all(isinstance(code, str) for code in ths_code):
-            return error_response("ths_code 必须是字符串或字符串列表")
+            return self._error_response("ths_code 必须是字符串或字符串列表")
 
         # 验证证券代码格式
         for code in ths_code:
             code = code.upper()
             if len(code) < 4 or not any(code.startswith(market) for market in MARKETS):
-                return error_response(f"证券代码必须至少4个字符，且以有效市场代码开头 {code[:4]}")
+                return self._error_response(f"证券代码必须至少4个字符，且以有效市场代码开头 {code[:4]}")
 
         # 检查市场代码是否一致
         markets = {code[:4] for code in ths_code}
         if len(markets) > 1:
-            return error_response("所有股票代码必须属于同一市场")
+            return self._error_response("所有股票代码必须属于同一市场")
 
         # 准备查询参数
         market = markets.pop()  # 获取唯一的市场代码
@@ -1485,24 +1597,24 @@ class THS:
 
         # 验证查询键是否有效
         if query_key not in QUERY_CONFIG:
-            return error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
+            return self._error_response(f"无效的查询键。必须为 {list(QUERY_CONFIG.keys())} 之一")
 
         # 将单一字符串转换为列表以统一处理
         if isinstance(ths_code, str):
             ths_code = [ths_code]
         elif not isinstance(ths_code, list) or not all(isinstance(code, str) for code in ths_code):
-            return error_response("ths_code 必须是字符串或字符串列表")
+            return self._error_response("ths_code 必须是字符串或字符串列表")
 
         # 验证证券代码格式
         for code in ths_code:
             code = code.upper()
             if len(code) < 4 or not any(code.startswith(market) for market in MARKETS):
-                return error_response("证券代码必须至少4个字符，且以有效市场代码开头")
+                return self._error_response("证券代码必须至少4个字符，且以有效市场代码开头")
 
         # 检查市场代码是否一致
         markets = {code[:4] for code in ths_code}
         if len(markets) > 1:
-            return error_response("所有股票代码必须属于同一市场")
+            return self._error_response("所有股票代码必须属于同一市场")
 
         # 准备查询参数
         market = markets.pop()  # 获取唯一的市场代码
@@ -1537,7 +1649,7 @@ class THS:
         Raises:
             InvalidCodeError: 如果证券代码格式无效或多个代码的市场不一致。
         """
-        pass
+        raise NotImplementedError("option_data 尚未实现：等待后端数据字典与服务定义")
 
     def ipo_today(self) -> Response:
         """查询今日 IPO 数据。
@@ -1556,10 +1668,13 @@ class THS:
         return self.call("ipo_wait")
 
     def normalize_symbol(self, ths_code: Union[str, list]) -> Response:
-        """补齐完整代码，补齐完整市场代码
+        """补齐完整代码与市场代码。
+
+        Args:
+            ths_code (str | List[str]): 待补齐的代码或代码列表。
 
         Returns:
-            Response:
+            Response: 包含补齐后的代码映射。若输入无效，返回 `err_info`。
         """
         params = {
             "codes" if isinstance(ths_code, list) else "code": ths_code,
@@ -1569,10 +1684,13 @@ class THS:
         return response
 
     def watchlist(self, cookie: str = "") -> Response:
-        """自选股
+        """获取自选股列表。
 
-        :param cookie: 在浏览器直接复制完整全部cookie
-        :return:
+        Args:
+            cookie (str): 浏览器完整 cookie 字符串。
+
+        Returns:
+            Response: 自选股列表。cookie 无效时返回 `err_info`。
         """
 
         params = {
@@ -1584,8 +1702,13 @@ class THS:
 
     def watchlist_add(self, cookie: str = "", code: str = "") -> Response:
         """添加自选。
-            :param cookie: 在浏览器直接复制完整全部cookie
-            :param code: 证券代码，格式为6位。e.g. 300033
+
+        Args:
+            cookie (str): 浏览器完整 cookie 字符串。
+            code (str): 六位证券代码，例如 "300033"。
+
+        Returns:
+            Response: 操作结果。参数无效时返回 `err_info`。
         """
         params = {
             "cookie": cookie,
@@ -1598,9 +1721,14 @@ class THS:
 
     def watchlist_delete(self, cookie: str = "", code: str = "", marketid: str = "") -> Response:
         """删除自选。
-            :param cookie: 在浏览器直接复制完整全部cookie
-            :param code: 证券代码，格式为6位。e.g. 300033
-            :param marketid: 市场代码，格式为4位。e.g. 33
+
+        Args:
+            cookie (str): 浏览器完整 cookie 字符串。
+            code (str): 六位证券代码，例如 "300033"。
+            marketid (str): 市场ID，两位或四位数字。
+
+        Returns:
+            Response: 操作结果。参数无效时返回 `err_info`。
         """
         params = {
             "cookie": cookie,
@@ -1613,10 +1741,13 @@ class THS:
         return response
 
     def group(self, cookie: str = "") -> Response:
-        """分组
+        """获取自选分组信息。
 
-        :param cookie: 在浏览器直接复制完整全部cookie
-        :return:
+        Args:
+            cookie (str): 浏览器完整 cookie 字符串。
+
+        Returns:
+            Response: 分组列表。cookie 无效时返回 `err_info`。
         """
 
         params = {
@@ -1627,12 +1758,15 @@ class THS:
         return response
 
     def group_new(self, cookie: str, group_name: str, version: str) -> Response:
-        """新建分组
+        """新建分组。
 
-        :param cookie: 在浏览器直接复制完整全部cookie
-        :param group_name: 分组名称
-        :param version: 版本号
-        :return:
+        Args:
+            cookie (str): 浏览器完整 cookie 字符串。
+            group_name (str): 分组名称。
+            version (str): 版本号。
+
+        Returns:
+            Response: 操作结果。参数无效时返回 `err_info`。
         """
 
         params = {
@@ -1648,12 +1782,15 @@ class THS:
         return response
 
     def group_delete(self, cookie: str, ids: str, version: str) -> Response:
-        """删除分组
+        """删除分组。
 
-        :param cookie: 在浏览器直接复制完整全部cookie
-        :param ids: 分组ID，多个用逗号分隔
-        :param version: 版本号
-        :return:
+        Args:
+            cookie (str): 浏览器完整 cookie 字符串。
+            ids (str): 待删除分组ID，多个以逗号分隔。
+            version (str): 版本号。
+
+        Returns:
+            Response: 操作结果。参数无效时返回 `err_info`。
         """
 
         params = {
@@ -1668,13 +1805,16 @@ class THS:
         return response
 
     def group_code_add(self, cookie: str, id: str, version: str, ths_codes: List[str]) -> Response:
-        """分组添加元素
+        """分组添加元素。
 
-        :param cookie: 在浏览器直接复制完整全部cookie
-        :param id: 分组ID
-        :param version: 版本号
-        :param ths_codes: 证券代码列表，格式为10位，以 'USHA' 或 'USZA' 开头。
-        :return:
+        Args:
+            cookie (str): 浏览器完整 cookie 字符串。
+            id (str): 分组ID。
+            version (str): 版本号。
+            ths_codes (List[str]): 10位完整代码（含市场）。
+
+        Returns:
+            Response: 操作结果。参数无效时返回 `err_info`。
         """
         num = 0
 
@@ -1685,7 +1825,7 @@ class THS:
             if len(ths_code) <= 4:
                 print(f"ths_code {ths_code} 必须为大于4位")
                 continue
-            if ths_code[:4] not in ["USHA", "USZA", "USHD", "USZD", "USTM"]:
+            if ths_code[:4] not in ["USHA", "USZA", "USHD", "USZD", "USTM", "USHT"]:
                 print(f"ths_code {ths_code} 必须以有效市场代码开头")
                 continue
 
@@ -1710,13 +1850,16 @@ class THS:
         return response
 
     def group_code_delete(self, cookie: str, id: str, version: str, ths_codes: List[str]) -> Response:
-        """删除分组
+        """分组删除元素。
 
-        :param cookie: 在浏览器直接复制完整全部cookie
-        :param id: 分组ID
-        :param version: 版本号
-        :param ths_codes: 证券代码列表，格式为10位，以 'USHA' 或 'USZA' 开头。
-        :return:
+        Args:
+            cookie (str): 浏览器完整 cookie 字符串。
+            id (str): 分组ID。
+            version (str): 版本号。
+            ths_codes (List[str]): 10位完整代码（含市场）。
+
+        Returns:
+            Response: 操作结果。参数无效时返回 `err_info`。
         """
 
         num = 0
@@ -1727,7 +1870,7 @@ class THS:
             if len(ths_code) <= 4:
                 print(f"ths_code {ths_code} 必须为大于4位")
                 continue
-            if ths_code[:4] not in ["USHA", "USZA", "USHD", "USZD", "USTM"]:
+            if ths_code[:4] not in ["USHA", "USZA", "USHD", "USZD", "USTM", "USHT"]:
                 print(f"ths_code {ths_code} 必须以有效市场代码开头")
                 continue
 
@@ -1761,11 +1904,10 @@ class THS:
         """
         result_code, result = self.lib_call("help", req)
         response = Response(result)
-        payload_result = response.get_result()
 
-        if isinstance(payload_result, str):
-            return payload_result
-        elif isinstance(payload_result, dict):
-            help_value = payload_result.get("help", "")
+        if isinstance(response.data, str):
+            return response.data
+        elif isinstance(response.data, dict):
+            help_value = response.data.get("help", "")
             return help_value if isinstance(help_value, str) else ""
         return ""

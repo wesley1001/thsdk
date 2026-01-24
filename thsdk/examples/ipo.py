@@ -8,13 +8,13 @@ def main():
     try:
         # 连接到行情服务器
         response = ths.connect()
-        if not response.is_success():
-            print(f"登录错误:{response.err_info}")
+        if not response:
+            print(f"登录错误:{response.error}")
             return
 
         # 获取今日IPO
         response = ths.ipo_today()
-        df = pd.DataFrame(response.get_result())
+        df = response.df
         print("\n=== 今日IPO ===")
         if df.empty:
             print("没有数据")
@@ -23,7 +23,7 @@ def main():
 
         # 获取IPO等待列表
         response = ths.ipo_wait()
-        df = pd.DataFrame(response.get_result())
+        df = response.df
         print("\n=== IPO等待列表 ===")
         if df.empty:
             print("没有数据")
