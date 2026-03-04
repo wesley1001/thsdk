@@ -1,12 +1,10 @@
 import time
 from thsdk import THS
-import pandas as pd
 
 
 def main():
     ths = THS()
     try:
-        # 连接到行情服务器
         response = ths.connect()
         if not response:
             print(f"登录错误:{response.error}")

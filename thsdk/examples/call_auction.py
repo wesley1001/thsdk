@@ -26,6 +26,4 @@ with THS() as ths:
     print("合并数据后:")
     print(df)
 
-
-
     time.sleep(1)

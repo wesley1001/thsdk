@@ -1,5 +1,4 @@
 from thsdk import THS
-import pandas as pd
 import time
 from zoneinfo import ZoneInfo
 

@@ -1,9 +1,5 @@
 from thsdk import THS
-import pandas as pd
 import time
-from zoneinfo import ZoneInfo
-
-bj_tz = ZoneInfo('Asia/Shanghai')
 
 with THS() as ths:
     response = ths.index_list()
@@ -13,7 +9,6 @@ with THS() as ths:
     print(hs300_code)
     time.sleep(0.1)
 
-    # Request K-line data for each code in 'hs300_code'
     for code in hs300_code:
         klines_response = ths.klines(code, count=100)
         if klines_response:

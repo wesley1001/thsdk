@@ -1,16 +1,12 @@
 from thsdk import THS
 import pandas as pd
 import time
-from datetime import datetime
 from zoneinfo import ZoneInfo
 
-# Define the list of symbols to process
 markets = ["USHA", "USZA"]
 
-# Initialize an empty list to store results
 all_results = []
 
-# Define Beijing timezone
 beijing_tz = ZoneInfo("Asia/Shanghai")
 
 with THS() as ths:

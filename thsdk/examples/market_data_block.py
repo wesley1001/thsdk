@@ -3,6 +3,9 @@ from thsdk import THS
 import pandas as pd
 
 
+# pd.set_option('display.max_columns', None)
+# pd.set_option('display.max_columns', None)
+
 def main():
     """
     block_id:   0x4 沪封闭式基金
@@ -63,12 +66,11 @@ def main():
 
         response = ths.market_data_block(urfi_codes)
         df = response.df
-        # pd.set_option('display.max_columns', None)
+
         print(df)
 
         response = ths.market_data_block(urfi_codes, "扩展")
         df = response.df
-        # pd.set_option('display.max_columns', None)
         print(df)
 
     except Exception as e:

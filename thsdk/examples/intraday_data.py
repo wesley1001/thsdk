@@ -14,7 +14,7 @@ with THS() as ths:
     time.sleep(1)
 
     response = ths.intraday_data("USHI1A0001")
-    print("指数日内分时数据:")
+    print("上证指数日内分时数据:")
     if not response:
         print(f"错误信息: {response.error}")
     else:
