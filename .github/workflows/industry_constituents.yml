@@ -2,7 +2,7 @@ name: Industry Constituents Data Update
 
 on:
   schedule:
-    - cron: '0 3 * * 3' # Weekly Wednesday 03:00 UTC (11:00 Beijing)
+    - cron: '22 7 * * 3'
   workflow_dispatch:
 
 jobs:
