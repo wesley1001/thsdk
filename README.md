@@ -37,6 +37,57 @@ with THS() as ths:
 
 ```
 
+### 代码格式规则
+
+- 中国市场固定编码接口使用 `4位市场代码 + 6位数字代码`，例如 `USZA300033`、`USHA600519`
+- 国际市场或跨市场通用查询通常使用 `4位市场代码 + 可变长度证券缩写`，例如美股 `UNQQTSLA`
+- `klines`、`intraday_data`、`tick_level1`、`tick_super_level1`、`min_snapshot`、`call_auction`、`corporate_action`、`market_data_cn` 这类国内行情接口应传入固定 10 位代码
+- `market_data_us`、`market_data_hk`、`market_data_uk`、`market_data_index`、`market_data_forex` 等通用市场查询接口支持可变长度代码
+
+### 目录结构
+
+当前代码已经按职责拆分，核心目录位于 `thsdk/`：
+
+- `thsdk/thsdk.py`：对外聚合入口
+- `thsdk/base.py`：连接、动态库调用、通用校验
+- `thsdk/domestic.py`：国内固定长度行情接口
+- `thsdk/catalog.py`：板块与市场列表接口
+- `thsdk/market_queries.py`：`market_data_*` 系列通用查询
+- `thsdk/misc_api.py`：问财、资讯、帮助、补全代码等
+- `thsdk/response.py`：`Response` / `Payload`
+- `thsdk/query_configs.py`：查询配置常量
+- `thsdk/validators.py`：市场与代码规则常量
+- `thsdk/STRUCTURE.md`：更详细的结构说明
+
+### 测试
+
+单元测试已按职责拆分到 `tests/`：
+
+- `tests/test_base_helpers.py`
+- `tests/test_response_model.py`
+- `tests/test_high_level_apis.py`
+
+运行方式：
+
+```bash
+python -m unittest discover -s tests -p 'test_*.py'
+```
+
+兼容旧入口：
+
+```bash
+python -m unittest test_refactor.py
+```
+
+### README 维护原则
+
+本项目的 README 会刻意保留较详细的接口示例和返回样例，而不是只放目录索引或极简说明，原因有两点：
+
+- 方便人类读者一站式阅读，不必在多个文档之间来回跳转
+- 方便 AI 直接读取完整上下文，用于代码理解、自动补全、脚本生成、问题排查和文档问答
+
+因此后续维护时，README 仍应尽量保留高频接口的详细案例；模块拆分主要服务代码维护，不意味着 README 需要同步变成“只有链接没有内容”的文档。
+
 ### 典型使用流程
 
 下面是一个从“代码查询”到“数据获取与分析”的完整示例流程，便于快速上手：
@@ -112,9 +163,17 @@ THS(ops: Optional[Dict[str, Any]] = None)
 
 #### 数据查询方法
 
+当前高层接口按职责大致分为四类：
+
+- 国内固定长度行情接口：`klines`、`intraday_data`、`tick_level1`、`tick_super_level1`、`min_snapshot`、`call_auction`、`big_order_flow`、`corporate_action`
+- 板块与列表接口：`block`、`block_constituents`、`market_block`、`stock_*_lists`、`ths_industry`、`ths_concept`
+- 通用市场查询接口：`market_data_cn/us/hk/uk/bond/fund/future/forex/index/block`
+- 杂项工具接口：`search_symbols`、`query_securities`、`wencai_*`、`news`、`ipo_*`、`complete_ths_code`、`help`
+
 ##### K线数据
 - `klines(ths_code: str, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None, adjust: str = "", interval: str = "day", count: int = -1) -> Response`
   - 获取历史K线数据
+  - `ths_code` 仅支持国内固定编码，格式为 `4位市场代码 + 6位数字代码`
   - `interval` 支持：1m, 5m, 15m, 30m, 60m, 120m, day, week, month, quarter, year
   - `adjust` 支持：forward（前复权）, backward（后复权）, ""（不复权）
 
@@ -157,6 +216,7 @@ ths.klines("USZA300033", count=3)
 
 ##### 分时数据
 - `intraday_data(ths_code: str) -> Response`：日内分时数据
+  - `ths_code` 仅支持国内固定编码，格式为 `4位市场代码 + 6位数字代码`
 
 **请求参数：**
 ```python
@@ -192,6 +252,7 @@ ths.intraday_data("USZA300033")
 ```
 
 - `min_snapshot(ths_code: str, date: Optional[str] = None) -> Response`：历史分时数据
+  - `ths_code` 仅支持国内固定编码，格式为 `4位市场代码 + 6位数字代码`
 
 **请求参数：**
 ```python
@@ -222,6 +283,7 @@ ths.min_snapshot("USZA300033", date="20240315")
 
 ##### 成交数据
 - `tick_level1(ths_code: str) -> Response`：3秒tick成交数据
+  - `ths_code` 仅支持国内固定编码，格式为 `4位市场代码 + 6位数字代码`
 
 **请求参数：**
 ```python
@@ -498,8 +560,9 @@ ths.index_list()
 }
 ```
 
-##### 市场数据
+##### 通用市场数据
 - `market_data_cn(ths_code: Any, query_key: str = "基础数据") -> Response`：A股市场数据
+  - `ths_code` 使用国内固定编码，格式为 `4位市场代码 + 6位数字代码`
 
 **请求参数：**
 ```python
@@ -534,6 +597,9 @@ ths.market_data_cn("USZA300033", query_key="基础数据")
 }
 ```
 
+- `market_data_us(ths_code: Any, query_key: str = "基础数据") -> Response`：美股市场数据
+  - 支持 `4位市场代码 + 可变长度证券缩写`，如 `UNQQTSLA`
+- `market_data_hk(ths_code: Any, query_key: str = "基础数据") -> Response`：港股市场数据
 - `market_data_uk(ths_code: Any, query_key: str = "基础数据") -> Response`：英国市场数据
 - `market_data_bond(ths_code: Any, query_key: str = "基础数据") -> Response`：债券市场数据
 - `market_data_fund(ths_code: Any, query_key: str = "基础数据") -> Response`：基金市场数据
@@ -639,7 +705,7 @@ ths.search_symbols("同花顺")
 
 - `query_securities(pattern: str, needmarket: str = "") -> Response`：查询证券信息
 
-##### 其他数据
+##### 杂项数据与工具
 - `call_auction(ths_code: str) -> Response`：集合竞价数据
 
 **请求参数：**
@@ -1016,10 +1082,10 @@ API 响应的封装类。
 - `codes_by_market.py`：按市场查询代码
 
 ### 市场数据示例
-- `market_data_cn.py`：A股市场数据
+- `market_data_cn.py`：A股固定长度代码市场数据
 - `market_data_us.py`：美股市场数据
 - `market_data_hk.py`：港股市场数据
-- `market_data_uk.py`：英国市场数据
+- `market_data_uk.py`：英股市场数据
 - `market_data_bond.py`：债券市场数据
 - `market_data_fund.py`：基金市场数据
 - `market_data_future.py`：期货市场数据
@@ -1030,7 +1096,7 @@ API 响应的封装类。
 ### 交易数据示例
 - `call_auction.py`：集合竞价数据
 - `call_auction_anomaly.py`：竞价异动数据
-- `big_cash.py`：大单数据
+- `big_order_flow.py`：大单数据
 - `corporate_action.py`：权息资料
 
 ### 查询示例
@@ -1054,17 +1120,41 @@ API 响应的封装类。
 python thsdk/examples/kline.py
 ```
 
+一键检查全部示例语法：
+```bash
+python thsdk/examples/run_all_examples.py
+```
+
+一键顺序运行全部示例：
+```bash
+python thsdk/examples/run_all_examples.py --mode live
+```
+
+如果也要包含 `test_thsdk.py`：
+```bash
+python thsdk/examples/run_all_examples.py --mode live --include-test-script
+```
+
 ## 错误处理
 
-所有 API 方法返回 `Response` 对象，检查 `response.success` 来判断是否成功：
+所有 API 方法返回 `Response` 对象。示例代码的推荐写法是先判断 `if not response:`，失败后立即 `return` 或 `continue`，成功后再访问 `response.df` 或 `response.data`：
 
 ```python
 response = ths.klines("USZA300033", count=100)
-if response.success:
-    data = response.data
-else:
+if not response:
     print(f"错误: {response.error}")
+    return
+
+df = response.df
+print(df)
 ```
+
+如果需要批量运行 `examples` 目录：
+
+- 只做语法检查：`python thsdk/examples/run_all_examples.py`
+- 顺序执行全部示例：`python thsdk/examples/run_all_examples.py --mode live`
+- 只执行部分示例：`python thsdk/examples/run_all_examples.py --pattern 'market_data_*.py'`
+- 批量 API 冒烟测试：`python thsdk/examples/test_thsdk.py --suite all`
 
 ## 许可证
 
@@ -1092,11 +1182,11 @@ else:
 ## 常见问题
 
 1. **连接失败**：检查账户信息是否正确，或使用临时游客账户测试
-2. **数据为空**：确认证券代码格式正确（10位，以市场代码开头）
+2. **数据为空**：确认证券代码格式与接口要求一致。国内固定编码接口使用 `4位市场代码 + 6位数字代码`，通用市场接口可使用 `4位市场代码 + 可变长度证券缩写`
 3. **性能问题**：对于大量数据查询，考虑调整 `buffer_size` 参数
 4. **时区问题**：所有时间数据自动转换为亚洲/上海时区
 5. **权限不足 / 返回错误码**：请确认当前账户已开通相应市场和数据权限；若为临时游客账户，可能不支持部分专业数据或实时数据
-6. **请求频率受限**：同花顺侧可能对频繁、大量拉取数据进行限流，建议在批量任务中增加 `sleep` 间隔或分批次拉取
+6. **请求频率受限**：ths侧可能对频繁、大量拉取数据进行限流，建议在批量任务中增加 `sleep` 间隔或分批次拉取
 7. **在 Web/异步框架中使用**：`THS` 为同步阻塞调用，如在 `FastAPI` / `asyncio` 中使用，建议放入线程池执行，避免阻塞事件循环
 
 ## 版本历史
@@ -1105,5 +1195,5 @@ else:
 - v1.5.0：补充多市场支持（港股、美股等），增加部分列表类接口
 - v1.7.0：增加示例响应数据及自动生成脚本，优化 `Response.df` 转换逻辑
 - v1.7.14：补充期权、IPO 等接口，改进文档与 Apple Silicon 支持
-
+- v1.7.16：cc 重构代码结构
 
