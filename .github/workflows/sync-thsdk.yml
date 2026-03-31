@@ -80,6 +80,11 @@ jobs:
           echo "Syncing README from: $PACKAGE_ROOT/README.md"
           cp "$PACKAGE_ROOT/README.md" README.md
 
+          # Fix Markdown asset paths copied from the PyPI package so they render on GitHub.
+          sed -i \
+            's|!\[证券搜索页面截图\](thsdk/examples/webapp/screenshots/case_search_symbols.png)|![证券搜索页面截图](src/thsdk/examples/webapp/screenshots/case_search_symbols.png)|' \
+            README.md
+
       # ✅ 清空 src
       - name: Clean src directory
         run: |
