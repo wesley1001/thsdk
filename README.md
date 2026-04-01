@@ -44,6 +44,23 @@ with THS() as ths:
 - `klines`、`intraday_data`、`tick_level1`、`tick_super_level1`、`min_snapshot`、`call_auction`、`corporate_action`、`market_data_cn` 这类国内行情接口应传入固定 10 位代码
 - `market_data_us`、`market_data_hk`、`market_data_uk`、`market_data_index`、`market_data_forex` 等通用市场查询接口支持可变长度代码
 
+常用 4 位市场代码示例：
+
+- `USHA`：沪市 A 股
+- `USZA`：深市 A 股
+- `USTM`：北交所
+- `USHI`：上证指数
+- `USZI`：深证指数
+- `URFI`：同花顺行业/概念等板块
+- `UNQQ`：美股常见代码前缀示例，如 `UNQQTSLA`
+- `UFXB`：外汇
+
+如果手里还没有完整 `THSCODE`，可以先这样处理：
+
+- 只知道股票名称：直接用 `search_symbols("同花顺")`
+- 只知道股票代码：可用 `complete_ths_code("300033")` 补齐，也可以用 `search_symbols("300033")` 反查
+- 需要调用 `klines`、`intraday_data` 这类固定编码接口时，建议先拿到完整 `THSCODE`，再继续查询
+
 ### 目录结构
 
 当前代码已经按职责拆分，核心目录位于 `thsdk/`：
@@ -59,25 +76,48 @@ with THS() as ths:
 - `thsdk/validators.py`：市场与代码规则常量
 - `thsdk/STRUCTURE.md`：更详细的结构说明
 
-### 测试
+### Web 单页查询工具
 
-单元测试已按职责拆分到 `tests/`：
+仓库内提供了一个独立的 Web 示例目录 `thsdk/examples/webapp/`，用于查询常用 THSDK 接口，并把返回结果自动转成表格展示。
 
-- `tests/test_base_helpers.py`
-- `tests/test_response_model.py`
-- `tests/test_high_level_apis.py`
+示例目录说明见：[thsdk/examples/webapp/README.md](thsdk/examples/webapp/README.md)
 
-运行方式：
+启动方式：
 
 ```bash
-python -m unittest discover -s tests -p 'test_*.py'
+python3 -m thsdk.examples.webapp --host 127.0.0.1 --port 8765
 ```
 
-兼容旧入口：
+启动后打开 `http://127.0.0.1:8765`。
 
-```bash
-python -m unittest test_refactor.py
-```
+当前页面支持的常用接口包括：
+
+- `search_symbols`
+- `complete_ths_code`
+- `klines`
+- `intraday_data`
+- `tick_level1`
+- `min_snapshot`
+- `big_order_flow`
+- `corporate_action`
+- `call_auction_anomaly`
+- `news`
+- `wencai_nlp`
+- `market_data_cn/us/hk/uk/bond/fund/future/forex/index/block`
+
+页面特性：
+
+- 根据所选接口动态渲染参数表单
+- 每个接口的必填字段都预置默认值，并带一键快捷预设
+- 后端将 `data` / `extra` 统一标准化为表格或文本区域
+- 每次请求独立建立并断开 THS 连接，避免页面查询之间共享状态
+- 自动优先读取 `THS_USERNAME`、`THS_PASSWORD`、`THS_MAC` 环境变量
+
+截图案例：
+
+首次打开先做证券搜索：
+
+![证券搜索页面截图](src/thsdk/examples/webapp/screenshots/case_search_symbols.png)
 
 ### README 维护原则
 
@@ -671,9 +711,20 @@ ths.market_block("UFXB")
 ##### 证券查询
 - `search_symbols(pattern: str, needmarket: str = "") -> Response`：模糊查询证券代码
 
+适用场景：
+
+- 只知道股票名称、指数名称、板块名称时，直接传名称查询
+- 只知道证券代码但不确定市场时，也可以直接传代码查询
+- 需要缩小结果范围时，可结合 `needmarket` 使用，例如 `SH,SZ`、`NQ`、`RF`
+
 **请求参数：**
 ```python
 ths.search_symbols("同花顺")
+```
+
+```python
+ths.search_symbols("300033")
+ths.search_symbols("同花顺", "SH,SZ")
 ```
 
 **返回数据示例：**
@@ -1009,9 +1060,16 @@ ths.ipo_wait()
 ##### 工具类
 - `complete_ths_code(ths_code: Union[str, list]) -> Response`：完整THS代码信息
 
+适用场景：
+
+- 只知道纯证券代码，不知道前面的 4 位市场代码时，先用它补齐
+- 补齐后可将返回的完整 `THSCODE` 继续传给 `klines`、`intraday_data`、`market_data_cn` 等接口
+- 批量补齐时可直接传入代码列表
+
 **请求参数：**
 ```python
-ths.complete_ths_code("USZA300033")
+ths.complete_ths_code("300033")
+ths.complete_ths_code(["300033", "600519", "TSLA"])
 ```
 
 **返回数据示例：**
@@ -1105,6 +1163,7 @@ API 响应的封装类。
 - `query_data.py`：通用查询数据
 
 ### 其他示例
+- `webapp/`：本地 Web 单页查询工具与截图案例
 - `news.py`：资讯查询
 - `forex.py`：外汇数据
 - `hs300.py`：沪深300指数
@@ -1166,18 +1225,7 @@ print(df)
 
 ## API 示例数据
 
-本项目提供了完整的API响应示例数据，位于 `docs/example_responses/example_responses.json` 文件中。该文件包含56个THS SDK API方法的实际响应数据示例，包括：
-
-- 成功响应的数据结构
-- 错误响应的格式
-- 各种数据类型的返回格式（K线、分时、深度、列表等）
-
-这些示例数据可用于：
-- 开发和测试API集成
-- 了解各API的返回数据格式
-- 文档编写和示例代码开发
-
-示例数据由 `scripts/generate_response_examples.py` 脚本自动生成，包含所有公开API方法的响应示例。
+README 中保留了常用接口的静态示例响应，便于直接查看各 API 方法的返回结构。
 
 ## 常见问题
 
@@ -1196,4 +1244,3 @@ print(df)
 - v1.7.0：增加示例响应数据及自动生成脚本，优化 `Response.df` 转换逻辑
 - v1.7.14：补充期权、IPO 等接口，改进文档与 Apple Silicon 支持
 - v1.7.16：cc 重构代码结构
-

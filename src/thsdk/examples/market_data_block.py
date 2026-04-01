@@ -50,8 +50,8 @@ def main():
             print(f"获取板块列表失败: {list_response.error}")
             return
 
-        urfi_codes = list_response.df["代码"].head(5).tolist()
-        print(f"板块示例代码: {urfi_codes}")
+        urfi_codes = list_response.df["代码"].astype(str).tolist()
+        print(f"板块代码共 {len(urfi_codes)} 个，开始全量查询。")
 
         base_response = ths.market_data_block(urfi_codes)
         if not base_response:
